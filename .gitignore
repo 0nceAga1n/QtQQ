@@ -1,3 +1,49 @@
 ExamSys
 MYPlayer
 WPS
+
+# Visual Studio 临时缓存（.ipch 等文件可达数百 MB）
+.vs/
+*.ipch
+*.ipch.*
+*.aps
+*.opensdf
+*.sdf
+*.opendb
+*.user
+*.suo
+*.vc.db
+*.vc.db-shm
+*.vc.db-wal
+
+# 编译输出
+x64/
+Debug/
+Release/
+build/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.exp
+*.tlog
+*.log
+*.lastbuildstate
+*.recipe
+
+# Qt 生成文件
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.autogen/
+*_autogen/
+mocs_compilation.cpp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.ninja
+.ninja_*
