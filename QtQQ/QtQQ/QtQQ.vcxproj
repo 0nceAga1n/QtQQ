@@ -102,9 +102,7 @@
     <ClCompile Include="notifymanager.cpp" />
     <ClCompile Include="qclicklabel.cpp" />
     <ClCompile Include="qmsgtextedit.cpp" />
-    <ClCompile Include="receivefile.cpp" />
     <ClCompile Include="rootcontactitem.cpp" />
-    <ClCompile Include="sendfile.cpp" />
     <ClCompile Include="skinwindow.cpp" />
     <ClCompile Include="systray.cpp" />
     <ClCompile Include="talkwindow.cpp" />
@@ -120,8 +118,6 @@
     <ClCompile Include="main.cpp" />
     <QtUic Include="contactitem.ui" />
     <QtUic Include="emotionwindow.ui" />
-    <QtUic Include="receivefile.ui" />
-    <QtUic Include="sendfile.ui" />
     <QtUic Include="skinwindow.ui" />
     <QtUic Include="talkwindow.ui" />
     <QtUic Include="talkwindowitem.ui" />
@@ -139,8 +135,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="commonutils.h" />
-    <QtMoc Include="receivefile.h" />
-    <QtMoc Include="sendfile.h" />
+    <ClInclude Include="msgprotocol.h" />
     <QtMoc Include="msgwebview.h" />
     <QtMoc Include="qmsgtextedit.h" />
     <QtMoc Include="windowmanager.h" />

@@ -16,15 +16,14 @@ void TcpSocket::run()
 
 void TcpSocket::onClientDisconnect()
 {
-	emit signalClientDisconnect(m_descriptor);	//触发信号告诉服务端TcpServer当前客户端断开链接额
+	emit signalClientDisconnect(m_descriptor);	//触发信号告诉服务端TcpServer当前客户端断开连接
 }
 
 void TcpSocket::onReceiveData()
 {
 	QByteArray buffer = this->readAll();	//读取客户端发来的消息
-	if (!buffer.isEmpty()) {
-		QString strData = QString::fromUtf8(buffer);
-
-		emit signalGetDataFromClient(buffer, m_descriptor);	//触发信号将数据传递到服务端TcpServer
+	const QList<QJsonObject>& frames = m_decoder.push(buffer);	//分帧
+	for (const QJsonObject& obj : frames) {
+		emit signalMsgFrame(obj, m_descriptor);	// 每帧单独处理
 	}
 }

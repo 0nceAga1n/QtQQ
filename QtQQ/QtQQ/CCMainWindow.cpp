@@ -12,10 +12,9 @@
 #include <QPainter>
 #include <QTimer>
 #include <QApplication>
-#include <QSqlQuery>
+#include <QJsonObject>
 
 QString gstrLoginHeadPath;	//定义全局变量获取登录者头像路径
-extern QString gLoginEmployeeID;	//全局变量
 
 class CustomProxyStyle : public QProxyStyle
 {		//自定义代理样式类，重写drawPrimitive虚函数
@@ -30,8 +29,8 @@ public:
 	}
 };
 
-CCMainWindow::CCMainWindow(QString account, bool isAccountLogin, QWidget* parent)
-	: BasicWindow(parent), m_account(account), m_isAccountLogin(isAccountLogin)
+CCMainWindow::CCMainWindow(QString loginPicture, QJsonArray departments, QWidget* parent)
+	: BasicWindow(parent), m_loginPicture(loginPicture), m_departments(departments)
 {
     ui.setupUi(this);
 
@@ -113,12 +112,12 @@ void CCMainWindow::updateSearchStyle()
 								.arg(m_colorBackGround.red()).arg(m_colorBackGround.green()).arg(m_colorBackGround.blue()));
 }
 
-void CCMainWindow::addCompanyDeps(QTreeWidgetItem* pRootGroupItem, int DepID)
+void CCMainWindow::addCompanyDeps(QTreeWidgetItem* pRootGroupItem, const QJsonObject& dep)
 {
 	//创建子项
 	QTreeWidgetItem* pChild = new QTreeWidgetItem;
 	pChild->setData(0, Qt::UserRole, 1);	//设置子项标志为1
-	pChild->setData(0, Qt::UserRole + 1, DepID);	//用部门ID区分不同子项
+	pChild->setData(0, Qt::UserRole + 1, dep.value("departmentID").toString());	//用部门ID区分不同子项
 
 	//自定义聊天控件初始化
 	ContactItem* pContactItem = new ContactItem(ui.treeWidget);
@@ -127,18 +126,12 @@ void CCMainWindow::addCompanyDeps(QTreeWidgetItem* pRootGroupItem, int DepID)
 	QPixmap pix;
 	pix.load(":/Resources/MainWindow/head_mask.png");
 	QPixmap groupPix;
-	QSqlQuery queryPicture(QString("SELECT picture FROM tab_department WHERE departmentID = %1").arg(DepID));
-	queryPicture.exec();
-	queryPicture.next();
-	groupPix.load(queryPicture.value(0).toString());
+	groupPix.load(dep.value("picture").toString());
 	pContactItem->setHeadPixmap(getRoundImage(groupPix, pix, pContactItem->getHeadLabelSize()));
 	
 	//设置群组名称
 	QString strDepName;
-	QSqlQuery queryDepName(QString("SELECT department_name FROM tab_department WHERE departmentID = %1").arg(DepID));
-	queryDepName.exec();
-	queryDepName.first();
-	pContactItem->setUserName(queryDepName.value(0).toString());
+	pContactItem->setUserName(dep.value("department_name").toString());
 
 	pRootGroupItem->addChild(pChild);	//根项添加子项
 	ui.treeWidget->setItemWidget(pChild, 0, pContactItem);	//控件嵌入子项
@@ -146,29 +139,8 @@ void CCMainWindow::addCompanyDeps(QTreeWidgetItem* pRootGroupItem, int DepID)
 
 QString CCMainWindow::getHeadPicturePath()
 {
-	QString strPicturePath;
-	if (!m_isAccountLogin) {	//员工id登录
-		QSqlQuery queryPicture(QString("SELECT picture FROM tab_employees WHERE employeeID = %1").arg(m_account));
-		queryPicture.exec();
-		queryPicture.next();
-
-		strPicturePath = queryPicture.value(0).toString();
-	}
-	else {	//员工账号登录
-		QSqlQuery queryEmployeeID(QString("SELECT employeeID FROM tab_accounts WHERE account = '%1'").arg(m_account));	//先获取员工id
-		queryEmployeeID.exec();
-		queryEmployeeID.next();
-		int employeeID = queryEmployeeID.value(0).toInt();
-
-		QSqlQuery queryPicture(QString("SELECT picture FROM tab_employees WHERE employeeID = %1").arg(employeeID));
-		queryPicture.exec();
-		queryPicture.next();
-
-		strPicturePath = queryPicture.value(0).toString();
-	}
-
-	gstrLoginHeadPath = strPicturePath;
-	return strPicturePath;
+	gstrLoginHeadPath = m_loginPicture;
+	return m_loginPicture;
 }
 
 void CCMainWindow::setUserName(const QString& username)
@@ -256,21 +228,10 @@ void CCMainWindow::initContactTree()
 	ui.treeWidget->addTopLevelItem(pRootGroupItem);	//根项添加到treeWidget
 	ui.treeWidget->setItemWidget(pRootGroupItem, 0, pItemName);	//将标签控件设置到根项第0列
 
-	//公司群部门号
-	QSqlQuery queryComDepID(QString("SELECT departmentID FROM tab_department WHERE department_name = '%1'").arg(QString::fromUtf8("公司群")));
-	queryComDepID.exec();
-	queryComDepID.first();
-	int ComDepID = queryComDepID.value(0).toInt();
-
-	//获取登录者所在部门号
-	QSqlQuery querySelfDepID(QString("SELECT departmentID FROM tab_employees WHERE employeeID = %1").arg(gLoginEmployeeID));
-	querySelfDepID.exec();
-	querySelfDepID.first();
-	int SelfDepID = querySelfDepID.value(0).toInt();
-	
 	//给根项添加子项
-	addCompanyDeps(pRootGroupItem, ComDepID);
-	addCompanyDeps(pRootGroupItem, SelfDepID);
+	for (const QJsonValue& v : m_departments) {
+		addCompanyDeps(pRootGroupItem, v.toObject());
+	}
 }
 
 void CCMainWindow::resizeEvent(QResizeEvent* event)

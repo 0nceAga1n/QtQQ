@@ -1,11 +1,9 @@
 ﻿#include "userlogin.h"
 #include "CCMainWindow.h"
 #include <QMessageBox>
-#include <QSqlDatabase>
-#include <QSqlQuery>
-#include <QSqlError>
 
 QString gLoginEmployeeID;	//登录者账号
+QString gLoginToken;	//登录token
 
 UserLogin::UserLogin(QWidget *parent)
 	: BasicWindow(parent)
@@ -35,91 +33,74 @@ void UserLogin::initControl()
 
 	connect(ui.loginBtn, &QPushButton::clicked, this, &UserLogin::onLoginBtnClicked);
 
-	if (!connectMysql()) {
-		QMessageBox::information(NULL, QString::fromUtf8("提示"),
-			QString::fromUtf8("连接数据库失败"));
-		close();
-	}
+	initLoginSocket();	//建立登录连接
 }
 
-bool UserLogin::connectMysql()
+void UserLogin::initLoginSocket()
 {
-	QSqlDatabase db = QSqlDatabase::addDatabase("QMYSQL");
-	db.setDatabaseName("qt_qq");
-	db.setHostName("localhost");
-	db.setUserName("root");
-	db.setPassword("kzk");
-	db.setPort(3306);
+	m_loginSocket = new QTcpSocket(this);
+	//收到登录反馈时进行处理
+	connect(m_loginSocket, &QTcpSocket::readyRead, this, [this]() {
+		QByteArray buffer = m_loginSocket->readAll();
+		const QList<QJsonObject>& frames = m_decoder.push(buffer);
+		for (const QJsonObject& obj : frames) {
+			if (obj.value("cmd").toString() == "auth_result") {
+				handleAuthResult(obj);
+			}
+		}
+	});
 
-	if (db.open()) {
-		return true;
+	m_loginSocket->connectToHost("127.0.0.1", MsgProtocol::TCP_PORT);
+}
+
+void UserLogin::handleAuthResult(const QJsonObject& obj)
+{
+	bool ok = obj.value("ok").toBool();
+	if (!ok) {
+		QMessageBox::information(NULL, QString::fromUtf8("提示"), QString::fromUtf8("您输入的账号或密码有误，请重新输入！"));
+		ui.loginBtn->setEnabled(true);
+		return;
+	}
+
+	gLoginToken = obj.value("token").toString();
+	gLoginEmployeeID = obj.value("employeeID").toString();	//登录者ID
+	QString loginPicture = obj.value("picture").toString();	//登录者头像路径
+	QJsonArray departments = obj.value("departments").toArray();	//CCMainWindow的联系树
+
+	close();
+	CCMainWindow* mainWindow = new CCMainWindow(loginPicture, departments);
+	mainWindow->show();
+}
+
+void UserLogin::keyPressEvent(QKeyEvent* event)
+{
+	if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+		onLoginBtnClicked();
 	}
 	else {
-		qDebug() << db.lastError().text();
-		return false;
+		BasicWindow::keyPressEvent(event);
 	}
-}
-
-bool UserLogin::veryfyAccountCode(bool& isAccountLogin, QString& strAccount)
-{
-	QString strAccountInput = ui.editUserAccount->text();
-	QString strCodeInput = ui.editPassword->text();
-
-	//员工号登录
-	QString strSqlCode = QString("SELECT code FROM tab_accounts WHERE employeeID = %1").arg(strAccountInput);
-	QSqlQuery queryEmployeeID(strSqlCode);
-	queryEmployeeID.exec();
-	if (queryEmployeeID.first()) {	//输入的账号在数据库中能找到
-		QString strCode = queryEmployeeID.value(0).toString();
-		if (strCode == strCodeInput) {	//密码正确
-			gLoginEmployeeID = strAccountInput;
-			isAccountLogin = false;
-			strAccount = strAccountInput;
-			return true;
-		}
-		else {
-			return false;
-		}
-	}
-
-	//账号登录
-	strSqlCode = QString("SELECT code, employeeID FROM tab_accounts WHERE account = '%1'").arg(strAccountInput);
-	QSqlQuery queryAccount(strSqlCode);
-	queryAccount.exec();
-	if (queryAccount.first()) {
-		QString strCode = queryAccount.value(0).toString();
-
-		if (strCode == strCodeInput) {
-			gLoginEmployeeID = queryAccount.value(1).toString();
-			isAccountLogin = true;
-			strAccount = strAccountInput;
-			return true;
-		}
-		else {
-			return false;
-		}
-	}
-	return false;
 }
 
 void UserLogin::onLoginBtnClicked()
 {
-	bool isAccountLogin;
-	QString strAccount;
+	QString account = ui.editUserAccount->text().trimmed();
+	QString code = ui.editPassword->text();
 
-	//点击登录按钮，登录窗口关闭，创建聊天主窗口
-	if (!veryfyAccountCode(isAccountLogin, strAccount)) {
-		QMessageBox::information(NULL, QString::fromUtf8("提示"),
-			QString::fromUtf8("您输入的账号或密码有误，请重新输入！"));
+	if (account.isEmpty() || code.isEmpty()) {
 		return;
 	}
 
-	QSqlQuery sqlUpdate;
-	sqlUpdate.prepare("UPDATE tab_employees SET online = 2 WHERE employeeID = ?");
-	sqlUpdate.addBindValue(gLoginEmployeeID);
-	sqlUpdate.exec();
+	if (m_loginSocket->state() != QAbstractSocket::ConnectedState) {
+		QMessageBox::information(NULL, QString::fromUtf8("提示"), QString::fromUtf8("正在连接服务器，请稍后重试"));
+		return;
+	}
 
-	close();
-	CCMainWindow* mainWindow = new CCMainWindow(strAccount, isAccountLogin);
-	mainWindow->show();
+	QJsonObject obj;
+	obj.insert("cmd", "auth");
+	obj.insert("account", account);
+	obj.insert("code", code);
+	m_loginSocket->write(MsgProtocol::pack(obj));
+
+	ui.loginBtn->setEnabled(false);
 }

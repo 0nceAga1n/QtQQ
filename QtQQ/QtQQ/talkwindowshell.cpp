@@ -1,21 +1,14 @@
 ﻿#include "talkwindowshell.h"
 #include "commonutils.h"
 #include "talkwindow.h"
-#include <QSqlQueryModel>
-#include <QMessageBox>
-#include <QFile>	
-#include <QSqlQuery>
 #include "windowmanager.h"
 #include "qmsgtextedit.h"
-#include "sendfile.h"
-#include "receivefile.h"
 
-QString gfileName;
-QString gfileData;
+#include <QMessageBox>
+#include <QFile>	
 
-const int gtcpPort = 8888;	//通信端口
-const int gudpPort = 6666;
 extern QString gLoginEmployeeID;
+extern QString gLoginToken;
 
 TalkWindowShell::TalkWindowShell(QWidget *parent)
 	: BasicWindow(parent)
@@ -25,18 +18,6 @@ TalkWindowShell::TalkWindowShell(QWidget *parent)
 	initControl();
 
 	initTcpSocket();	//初始化tcp通信
-	initUdpSocket();	//初始化udp通信
-
-	//首次打开聊天窗口时更新js脚本
-	QFile file("Resources/MainWindow/MsgHtml/msgTmpl.js");
-	if (!file.size()) {
-		QStringList employeesIDList;
-		getEmployeesID(employeesIDList);
-		if (!createJSFile(employeesIDList)) {
-			QMessageBox::information(this, QString::fromUtf8("提示"),
-				QString::fromUtf8("更新js文件失败"));
-		}
-	}
 }
 
 TalkWindowShell::~TalkWindowShell()
@@ -45,7 +26,20 @@ TalkWindowShell::~TalkWindowShell()
 	m_emotionWindow = nullptr;
 }
 
-void TalkWindowShell::addTalkWindow(TalkWindow* talkWindow, TalkWindowItem* talkWindowItem, const QString uid)
+void TalkWindowShell::sendFetchTalkInfo(const QString& uid)
+{
+	if (m_tcpClientSocket->state() != QAbstractSocket::ConnectedState) {
+		m_pendingTalkInfo.append(uid);
+		return;
+	}
+
+	QJsonObject req;
+	req.insert("cmd", QString("fetch_talk_info"));
+	req.insert("uid", uid);
+	m_tcpClientSocket->write(MsgProtocol::pack(req));
+}
+
+void TalkWindowShell::addTalkWindow(TalkWindow* talkWindow, TalkWindowItem* talkWindowItem, const QString uid, const QString& picture)
 {
 	//添加右侧聊天窗口
 	ui.rightStackedWidget->addWidget(talkWindow);
@@ -59,20 +53,8 @@ void TalkWindowShell::addTalkWindow(TalkWindow* talkWindow, TalkWindowItem* talk
 	aItem->setSelected(true);
 
 	//设置左侧聊天列表项的头像
-	QSqlQueryModel sqlDepModel;
-	QString strQuery = QString("SELECT picture FROM tab_department WHERE departmentID = %1").arg(uid);	//群聊
-	sqlDepModel.setQuery(strQuery);
-	int rows = sqlDepModel.rowCount();
-
-	if (rows == 0) {	//单聊
-		strQuery = QString("SELECT picture FROM tab_employees WHERE employeeID = %1").arg(uid);
-		sqlDepModel.setQuery(strQuery);
-	}
-	QModelIndex index;
-	index = sqlDepModel.index(0, 0);
 	QImage img;
-	img.load(sqlDepModel.data(index).toString());
-
+	img.load(picture);
 	talkWindowItem->setHeadPixmap(QPixmap::fromImage(img));
 
 	//添加左侧聊天列表项，将传入的控件嵌入列表项
@@ -94,6 +76,14 @@ void TalkWindowShell::addTalkWindow(TalkWindow* talkWindow, TalkWindowItem* talk
 				close();
 			}
 		});
+
+	// 拉取该窗口的历史消息（若尚未连接则先缓存）
+	if (m_tcpClientSocket->state() == QAbstractSocket::ConnectedState) {
+		sendFetchHistory(uid);
+	}
+	else {
+		m_pendingHistory.append(uid);
+	}
 }
 
 void TalkWindowShell::setCurrentWidget(QWidget* widget)
@@ -129,201 +119,180 @@ void TalkWindowShell::initControl()
 
 void TalkWindowShell::initTcpSocket()
 {
-	//建立客户端连接
+	//建立客户端套接字
 	m_tcpClientSocket = new QTcpSocket(this);
-	m_tcpClientSocket->connectToHost("127.0.0.1", gtcpPort);
+	
+	//收到服务端的消息时进行处理
+	connect(m_tcpClientSocket, &QTcpSocket::readyRead, this, &TalkWindowShell::onTcpReadyRead);
+	//成功连接到服务端时
+	connect(m_tcpClientSocket, &QTcpSocket::connected, this, [this]() {
+		// 连接成功后向服务端注册身份（对应服务端 handleLogin）
+		QJsonObject login;
+		login.insert("cmd", QString("login"));
+		login.insert("token", gLoginToken);
+		m_tcpClientSocket->write(MsgProtocol::pack(login));
+
+		// 连接建立后，拉取之前缓存的窗口信息
+		for (const QString& uid : m_pendingTalkInfo) {
+			sendFetchTalkInfo(uid);
+		}
+		m_pendingTalkInfo.clear();
+
+		// 连接建立后，拉取之前缓存的窗口历史
+		for (const QString& uid : m_pendingHistory) {
+			sendFetchHistory(uid);
+		}
+		m_pendingHistory.clear();
+	});
+
+	//连接服务端
+	m_tcpClientSocket->connectToHost("127.0.0.1", MsgProtocol::TCP_PORT);
 }
 
-void TalkWindowShell::initUdpSocket()
+void TalkWindowShell::processMsgFrame(const QJsonObject& obj)
 {
-	m_udpReceiver = new QUdpSocket(this);
-	for (quint16 port = gudpPort; port < gudpPort + 200; port++) {
-		if (m_udpReceiver->bind(port, QUdpSocket::ShareAddress))
-			break;
+	QString cmd = obj.value("cmd").toString();
+	if (cmd == "talk_info") {
+		WindowManager::getInstance()->createTalkWindow(obj);
+		return;
 	}
-	connect(m_udpReceiver, &QUdpSocket::readyRead, this, &TalkWindowShell::processPendingData);
+
+	if (cmd == "history") {	//历史消息响应
+		handleHistoryMsg(obj);
+		return;
+	}
+
+	if (cmd != "msg") {
+		return;
+	}
+	if (!MsgProtocol::isValidMsg(obj)) {	//非法消息不处理
+		return;
+	}
+
+	QString sender = obj.value("sender").toString();
+	QString receiver = obj.value("receiver").toString();
+	bool isGroup = obj.value("group").toInt() == 1;
+	QJsonArray segments = obj.value("segments").toArray();	//聊天消息
+
+	if (sender == gLoginEmployeeID) {
+		return;		// 自己的消息（服务端已排除，这里双保险）
+	}
+
+	QString windowID = isGroup ? receiver : sender;
+	QWidget* widget = WindowManager::getInstance()->findWindowName(windowID);
+	if (!widget) {
+		//TODO:窗口未打开，消息落库 + 未读标记，暂先丢弃
+		return;
+	}
+
+	this->setCurrentWidget(widget);
+	QListWidgetItem* item = m_talkwindowItemMap.key(widget);
+	if (item) {
+		item->setSelected(true);
+	}
+	handleReceivedMsg(sender.toInt(), segments);
 }
 
-void TalkWindowShell::getEmployeesID(QStringList& employeeIDList)
+void TalkWindowShell::sendFetchHistory(const QString& uid)
 {
-	//获取所有员工id
-	QSqlQueryModel queryModel;
-	queryModel.setQuery("SELECT employeeID FROM tab_employees WHERE status = 1");
-	int employeesNum = queryModel.rowCount();
-	QModelIndex index;
-	for (int i = 0; i < employeesNum; i++) {
-		index = queryModel.index(i, 0);
-		employeeIDList << queryModel.data(index).toString();
-	}
+	QJsonObject req;
+	req.insert("cmd", QString("fetch_history"));
+	req.insert("peer", uid);
+	req.insert("is_group", (uid.length() == 4) ? 1 : 0);
+	m_tcpClientSocket->write(MsgProtocol::pack(req));
 }
 
-bool TalkWindowShell::createJSFile(QStringList& employeeList)
+QString TalkWindowShell::buildSegmentsHtml(const QJsonArray& segments, MsgWebView* view)
 {
-	//打开js脚本模板文件，用于替换
-	QString strFileTxt = "Resources/MainWindow/MsgHtml/msgtmpl.txt";
-	QFile fileRead(strFileTxt);
-	QString strFile;	//js脚本模板内容
-	if (fileRead.open(QIODevice::ReadOnly)) {	//打开成功并读取
-		strFile = fileRead.readAll();
-		fileRead.close();
-	}
-	else {	//打开失败
-		QMessageBox::information(this, QString("Tips"), QString("msgtmpl.txt false"));
-		return false;
-	}
+	QString content;
+	for (const QJsonValue& val : segments) {
+		QJsonObject seg = val.toObject();
+		QString type = seg.value("type").toString();
+		QString data = seg.value("data").toString();
+		if (type == "image") {	//表情包
+			content += QString("<img src=\"qrc:/Resources/MainWindow/emotion/%1.png\" />").arg(data);
+		}
+		else if (type == "file") {	//文件链接
+			int index = view ? view->registerFile(seg) : -1;	//文件编号，用于查找文件信息
 
-	//打开要写入的js脚本，将替换后的js脚本模板写入
-	QFile fileWrite("Resources/MainWindow/MsgHtml/msgtmpl.js");
-	if (fileWrite.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-		//模板里要替换的4个部分
-		QString strSourceInitNull = "var external = null;";
-		QString strSourceInit = "external = channel.objects.external;";
-		QString strSourceNew = "new QWebChannel(qt.webChannelTransport,\
-			function(channel) {\
-			external = channel.objects.external;\
-		}\
-			); ";
-		QString strSourceRecvHtml;	//不好直接拼写，从txt文本中获取
-		QFile fileRecvHtml("Resources/MainWindow/MsgHtml/recvHtml.txt");
-		if (fileRecvHtml.open(QIODevice::ReadOnly)) {
-			strSourceRecvHtml = fileRecvHtml.readAll();
-			fileRecvHtml.close();
+			//计算文件大小
+			int size = seg.value("size").toInt();
+			QString sizeStr;
+			if (size < 1024) sizeStr = QString("%1 B").arg(size);
+			else if (size < 1024 * 1024) sizeStr = QString("%1 KB").arg(size / 1024.0, 0, 'f', 1);
+			else sizeStr = QString("%1 MB").arg(size / (1024.0 * 1024.0), 0, 'f', 1);
+
+			content += QString("<a href=\"download:%1\">📎 %2 (%3)</a>")
+				.arg(index).arg(seg.value("name").toString()).arg(sizeStr);
+		}
+		else {	//文本
+			content += QString("<span style=\"font-size:10pt;\">%1</span>").arg(data.toHtmlEscaped());
+		}
+	}
+	return content;
+}
+
+void TalkWindowShell::handleHistoryMsg(const QJsonObject& obj)
+{
+	QString peer = obj.value("peer").toString();
+	QJsonArray messages = obj.value("messages").toArray();
+
+	// 找到 peer 对应的聊天窗口（单聊=对方ID，群聊=群ID，正好是窗口映射的 key）
+	QWidget* widget = WindowManager::getInstance()->findWindowName(peer);
+	if (!widget) return;
+	TalkWindow* talkWindow = dynamic_cast<TalkWindow*>(widget);
+	if (!talkWindow) return;
+
+	// 服务端已按 msg_id 升序返回，直接按顺序渲染，就是从旧到新
+	for (const QJsonValue& v : messages) {
+		QJsonObject msg = v.toObject();
+		QString sender = msg.value("sender").toString();
+		QJsonArray segments = msg.value("segments").toArray();
+
+		QString htmlText = QString("<html><body>%1</body></html>").arg(buildSegmentsHtml(segments, talkWindow->ui.msgWidget));
+
+		bool isSelf = (sender == gLoginEmployeeID);
+		if (isSelf) {
+			// 自己发的历史消息：右气泡，但不触发发送
+			talkWindow->ui.msgWidget->appendMsg(htmlText, "0", false);
 		}
 		else {
-			QMessageBox::information(this, QString("Tips"), QString("recvHtml.txt false"));
-			return false;
+			// 对方发的历史消息：左气泡
+			talkWindow->ui.msgWidget->appendMsg(htmlText, sender, false);
 		}
-
-		//替换后的内容
-		QString strReplaceInitNull;
-		QString strReplaceInit;
-		QString strReplaceNew;
-		QString strReplaceRecvHtml;
-		for (int i = 0; i < employeeList.length(); i++) {
-			QString strInitNull = strSourceInitNull;
-			strInitNull.replace("external", QString("external_%1").arg(employeeList.at(i)));
-			strReplaceInitNull += strInitNull;
-			strReplaceInitNull += "\n";
-
-			QString strInit = strSourceInit;
-			strInit.replace("external", QString("external_%1").arg(employeeList.at(i)));
-			strReplaceInit += strInit;
-			strReplaceInit += "\n";
-
-			QString strRecvHtml = strSourceRecvHtml;
-			strRecvHtml.replace("external", QString("external_%1").arg(employeeList.at(i)));
-			strRecvHtml.replace("recvHtml", QString("recvHtml_%1").arg(employeeList.at(i)));
-			strReplaceRecvHtml += strRecvHtml;
-			strReplaceRecvHtml += "\n";
-		}
-
-		//进行替换
-		strFile.replace(strSourceInitNull, strReplaceInitNull);
-		strFile.replace(strSourceInit, strReplaceInit);
-		strFile.replace(strSourceNew, strReplaceNew);
-		strFile.replace(strSourceRecvHtml, strReplaceRecvHtml);
-
-		//写入js脚本
-		QTextStream stream(&fileWrite);
-		stream << strFile;
-		fileWrite.close();
-
-		return true;
-	}
-	else {
-		QMessageBox::information(this, QString("Tips"), QString("msgtmpl.js false"));
-		return false;
 	}
 }
 
-void TalkWindowShell::handleReceivedMsg(int senderEmployeeID, int msgType, QString strMsg)
+void TalkWindowShell::handleReceivedMsg(int senderEmployeeID, const QJsonArray& segments)
 {
-	QMsgTextEdit msgTextEdit;	// 自定义的文本编辑器
-	msgTextEdit.setText(strMsg);
-
-	if (msgType == 1)	// 文本信息
-	{
-		msgTextEdit.document()->toHtml();
-	}
-	else if (msgType == 0)	// 表情信息
-	{
-		const int emotionWidth = 3; // 每个表情所占宽度
-		int emotionNum = strMsg.length() / emotionWidth; // 计算表情数量，数据长度 除以 每个表情宽度
-
-		// 遍历数据中的 表情，添加html里去
-		for (int i = 0; i < emotionNum; i++)
-		{
-			msgTextEdit.addEmotionUrl(strMsg.mid(i * 3, emotionWidth).toInt());
-		}
-	}
-
-	QString htmlText = msgTextEdit.document()->toHtml();
-	if (!htmlText.contains(".png") && !htmlText.contains("</span>"))
-	{
-		QString fontHtml;
-		QFile file(":/Resources/MainWindow/MsgHtml/msgFont.txt");
-		if (file.open(QIODevice::ReadOnly))
-		{
-			fontHtml = file.readAll();
-			// 将html文件里的 %1，用字符串 text 替换
-			fontHtml.replace("%1", strMsg);
-			file.close();
-		}
-		else
-		{
-			QMessageBox::information(this, QString::fromLocal8Bit("提示"),
-				QString::fromLocal8Bit("文件 msgFont.txt 不存在！"));
-			return;
-		}
-
-		// 判断转换后，有没有包含 fontHtml
-		if (!htmlText.contains(fontHtml))
-		{
-			htmlText.replace(strMsg, fontHtml);
-		}
-	}
+	TalkWindow* talkWindow = dynamic_cast<TalkWindow*>(ui.rightStackedWidget->currentWidget());
+	if (!talkWindow) return;
+	QString htmlText = QString("<html><body>%1</body></html>").arg(buildSegmentsHtml(segments, talkWindow->ui.msgWidget));
 
 	//在当前窗口的网页上添加消息
-	TalkWindow* talkWindow = dynamic_cast<TalkWindow*>(ui.rightStackedWidget->currentWidget());
 	talkWindow->ui.msgWidget->appendMsg(htmlText, QString::number(senderEmployeeID));
+
 }
 
-void TalkWindowShell::updateSendTcpMsg(QString& strData, int& msgType, QString fileName)
+void TalkWindowShell::updateSendTcpMsg(const QJsonArray& segments)
 {
+	if (segments.isEmpty()) {
+		return;
+	}
+
 	//获取发送消息的是哪个窗口
 	TalkWindow* curTalkWindow = dynamic_cast<TalkWindow*>(ui.rightStackedWidget->currentWidget());
-	QString talkId = curTalkWindow->getTalkId();
+	if (!curTalkWindow) {
+		return;
+	}
 
 	/*-----------将要发送的消息进行封装以便于解析--------------*/
-	QString strGroupFlag;	//区分单聊还是群聊
-	if (talkId.length() == 4) {	//群聊
-		strGroupFlag = "1";
-	}
-	else {	//单聊
-		strGroupFlag = "0";
-	}
-
-	QString strSend;	//封装后的消息
-	if (msgType == 1) {		//文本信息
-		int dataLength = strData.length();	//得到原信息的长度
-		QString strDataLength = QString::number(dataLength).rightJustified(5, '0');	//格式化文本信息长度，不足五位数则在左侧补0
-
-		strSend = strGroupFlag + gLoginEmployeeID + talkId + "1" + strDataLength + strData;
-	}
-	else if (msgType == 0) {	//表情包信息
-		strSend = strGroupFlag + gLoginEmployeeID + talkId + "0" + strData;
-	}
-	else if (msgType == 2) {	//文件信息
-		QString strLength = QString::number(strData.toUtf8().length());	//获取文件内容长度
-
-		strSend = strGroupFlag + gLoginEmployeeID + talkId + "2" + strLength + "bytes" + fileName + "data_begin" + strData;
-	}
+	QString talkId = curTalkWindow->getTalkId();
+	bool isGroup = (talkId.length() == 4);
+	QJsonObject obj = MsgProtocol::buildChatMsg(gLoginEmployeeID, talkId, isGroup, segments);
 
 	//将消息转化类型后发送到服务端
-	QByteArray dataBt;
-	dataBt.resize(strSend.length());
-	dataBt = strSend.toUtf8();
-	m_tcpClientSocket->write(dataBt);
+	m_tcpClientSocket->write(MsgProtocol::pack(obj));
 }
 
 void TalkWindowShell::onEmotionBtnClicked(bool)
@@ -353,208 +322,11 @@ void TalkWindowShell::onEmotionItemClicked(int emotionNum)
 	}
 }
 
-void TalkWindowShell::processPendingData()
+void TalkWindowShell::onTcpReadyRead()
 {
-	// 端口中，有未处理的数据
-	while (m_udpReceiver->hasPendingDatagrams())
-	{
-		const static int groupFlagWidth = 1;	// 群聊标志宽度，占1位
-		const static int groupWidth = 4;		// 群QQ号宽度，占4位
-		const static int employeeWidth = 5;		// 员工QQ号宽度
-		const static int msgTypeWidth = 1;		// 信息类型宽度
-		const static int msgLengthWidth = 5;	// 文本数据宽度，最多占5位
-		const static int pictureWidth = 3;		// 表情图片宽度
-
-		QByteArray btData;
-		btData.resize(m_udpReceiver->pendingDatagramSize());	// 获取 即将要处理数据的大小
-		m_udpReceiver->readDatagram(btData.data(), btData.size());	// 读取UDP数据（数据，大小）
-		QString strData = btData.data();	// 将原数据保存到 QString类型中，用于解析
-
-		QString strWindowID;	//聊天窗口ID
-		QString strSendEmployeeID, strRecevieID;	// 解析后得到的 发送端 和 接收端的id
-		QString strMsg;		// 解析后数据
-		int msgType;		// 数据类型
-
-		//获取 发送端的QQ号
-		strSendEmployeeID = strData.mid(groupFlagWidth, employeeWidth);
-		//自己发送的消息，服务器广播给了自己
-		if (strSendEmployeeID == gLoginEmployeeID)
-		{
-			continue;		// 直接返回,处理下一条数据
-		}
-
-		// 单聊和群聊分开处理
-		if (btData[0] == '1')	//群聊
-		{
-			// 获取群聊ID
-			strRecevieID = strData.mid(groupFlagWidth + employeeWidth, groupWidth);
-			strWindowID = strRecevieID;	//聊天窗口ID就是群聊ID
-
-			//获取消息类型，不同消息类型做不同解析
-			QChar cMsgType = btData[groupFlagWidth + employeeWidth + groupWidth];
-			if (cMsgType == '1')	//文本信息
-			{
-				msgType = 1;
-				// 获取文本信息 长度
-				int msgLength = strData.mid(groupFlagWidth + employeeWidth + groupWidth + msgTypeWidth, msgLengthWidth).toInt();
-				// 获取 数据包里的 文本数据
-				strMsg = strData.mid(groupFlagWidth + employeeWidth + groupWidth + msgTypeWidth + msgLengthWidth, msgLength);
-			}
-			else if (cMsgType == '0')	//表情消息
-			{
-				msgType = 0;
-				// 找到原数据里“images”位置
-				int posImages = strData.indexOf("images");
-				// 获取 数据包里的 表情包数据
-				strMsg = strData.right(strData.length() - posImages - QString("images").length());
-			}
-			else if (cMsgType == '2')	//文件信息
-			{
-				msgType = 2;
-
-				// 计算 bytes 的长度
-				int bytesWidth = QString("bytes").length();
-				// bytes，第一次出现的位置
-				int posBytes = strData.indexOf("bytes");
-				// data_begin，第一次出现的位置
-				int posData_begin = strData.indexOf("data_begin");
-
-				// 获取 文件名称
-				QString fileName = strData.mid(posBytes + bytesWidth, posData_begin - posBytes - bytesWidth);
-				// 将解析出来的 文件名称，赋值给全局变量
-				gfileName = fileName;
-
-				// 文件内容起始位置
-				int posData = posData_begin + QString("data_begin").length();
-				// 获取文件内容
-				strMsg = strData.mid(posData);
-				// 将解析出来的 文件内容，赋值给全局变量
-				gfileData = strMsg;
-
-				// 根据employeeID获取发送者姓名
-				QString sender;
-				int empID = strSendEmployeeID.toInt();
-				QSqlQuery querySenderName(QString("SELECT employee_name FROM tab_employees WHERE employeeID = %1").arg(empID));
-				querySenderName.exec();
-				if (querySenderName.first())
-				{
-					sender = querySenderName.value(0).toString();
-				}
-
-				// 接收文件的后续操作...
-				ReceiveFile* recvFile = new ReceiveFile(this);
-
-				// 用了点了取消，发送 返回信号
-				connect(recvFile, &ReceiveFile::refuseFile, [this]() {
-						return;
-				});
-
-				// 收到xxx的信息，将文本字符串，设置到标签
-				QString msgLabel = QString::fromUtf8("收到") + sender + QString::fromUtf8("发来的文件，是否接收？");
-				recvFile->setMsg(msgLabel);
-				recvFile->show();
-			}
-		}
-		else // 单聊
-		{
-			// 获取接收者的QQ号
-			strRecevieID = strData.mid(groupFlagWidth + employeeWidth, employeeWidth);
-			strWindowID = strSendEmployeeID;	//聊天窗口ID是发送者的id
-
-			// 不是我的信息，不做处理
-			// 接收者的ID 和 登陆者的ID ，不是一样的，则直接返回
-			if (strRecevieID != gLoginEmployeeID)
-			{
-				continue;
-			}
-
-			// 获取信息的类型
-			QChar cMsgType = btData[groupFlagWidth + employeeWidth + employeeWidth];
-			// 判断信息类型
-			if (cMsgType == '1')	//文本信息
-			{
-				msgType = 1;
-				// 提取，文本信息的长度
-				int msgLength = strData.mid(groupFlagWidth + employeeWidth + employeeWidth + msgTypeWidth, msgLengthWidth).toInt();
-				// 文本信息
-				strMsg = strData.mid(groupFlagWidth + employeeWidth + employeeWidth + msgTypeWidth + msgLengthWidth, msgLength);
-			}
-			else if (cMsgType == '0')	// 表情信息
-			{
-				msgType = 0;
-				int posImages = strData.indexOf("images");
-				// 获取 数据包里的 表情包数据
-				strMsg = strData.mid(posImages + QString("images").length());
-			}
-			else if (cMsgType == '2')	// 文件信息
-			{
-				msgType = 2;
-
-				int bytesWidth = QString("bytes").length();
-				int posBytes = strData.indexOf("bytes");
-				int data_beginWidth = QString("data_begin").length();
-				int posData_begin = strData.indexOf("data_begin");
-
-				// 文件名称
-				QString fileName = strData.mid(posBytes + bytesWidth, posData_begin - posBytes - bytesWidth);
-				gfileName = fileName;
-
-				// 文件内容
-				strMsg = strData.mid(posData_begin + data_beginWidth);
-				gfileData = strMsg;
-
-				// 根据employeeID获取发送者姓名
-				QString sender;
-				int empID = strSendEmployeeID.toInt();	// 转换成整形
-				QSqlQuery querySenderName(QString("SELECT employee_name FROM tab_employees WHERE employeeID = %1").arg(empID));
-				querySenderName.exec();
-				if (querySenderName.first())
-				{
-					sender = querySenderName.value(0).toString();
-				}
-
-				// 接收文件的后续操作...
-				ReceiveFile* recvFile = new ReceiveFile(this);
-
-				// 用了点了取消，发送 返回信号
-				connect(recvFile, &ReceiveFile::refuseFile, [this]() {
-						return;
-				});
-
-				// 收到xxx的信息，将文本字符串，设置到标签上
-				QString msgLabel = QString::fromUtf8("收到") + sender + QString::fromUtf8("发来的文件，是否接收？");
-				recvFile->setMsg(msgLabel);
-				recvFile->show();
-			}
-		}
-
-
-		/*---------------用户没打开窗口就收不到消息，bug，待优化----------------*/
-		// 将聊天窗口，设为活动的窗口
-		QWidget* widget = WindowManager::getInstance()->findWindowName(strWindowID);
-		// 判断窗口是否打开
-		if (widget)
-		{
-			// 已存在，就设为活动窗口
-			this->setCurrentWidget(widget);
-
-			// 将左侧聊天列表，同步激活
-			QListWidgetItem* item = m_talkwindowItemMap.key(widget);
-			item->setSelected(true);	// 设为选中，活动状态
-		}
-		else
-		{
-			return;		// 不存在，直接返回
-		}
-		/*---------------用户没打开窗口就收不到消息，bug，待优化----------------*/
-
-
-		// 对信息类型做判断，如果是文件类型，则不调用 handleReceivedMsg()
-		if (msgType != 2)
-		{
-			int sendEmployeeID = strSendEmployeeID.toInt();
-			// "网页"上追加数据
-			handleReceivedMsg(sendEmployeeID, msgType, strMsg);
-		}
+	QByteArray buffer = m_tcpClientSocket->readAll();	//读取服务端发来的消息
+	const QList<QJsonObject>& frames = m_decoder.push(buffer);		//分帧
+	for (const QJsonObject& obj : frames) {		//每帧单独处理
+		processMsgFrame(obj);
 	}
 }

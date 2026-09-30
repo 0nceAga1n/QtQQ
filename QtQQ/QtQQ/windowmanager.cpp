@@ -1,8 +1,6 @@
 ﻿#include "windowmanager.h"
 #include "talkwindow.h"
 #include "talkwindowitem.h"
-#include <QSqlQuery>
-#include <QSqlQueryModel>
 
 Q_GLOBAL_STATIC(WindowManager, theInstance)	//唯一的WindowManager
 
@@ -48,52 +46,44 @@ void WindowManager::addNewTalkWindow(const QString& uid)
 	}
 
 	QWidget* widget = findWindowName(uid);	//利用uid查找talkwindow
-	if (!widget) {	//没有找到uid对应的talkwindow时，创建talkwindow
-		m_strCreatingTalkID = uid;	//只在构建窗口时使用
-		
-		TalkWindow* talkwindow = new TalkWindow(m_talkwindowshell, uid);
-		TalkWindowItem* talkwindowItem = new TalkWindowItem(talkwindow);
-
-		m_strCreatingTalkID = "";
-
-		//从部门表中获取部门名称和部门标语
-		QSqlQueryModel sqlDepModel;
-		QString strSql = QString("SELECT department_name, sign FROM tab_department WHERE departmentID = %1").arg(uid);
-		sqlDepModel.setQuery(strSql);
-		int rows = sqlDepModel.rowCount();	//用于判断要添加的窗口是单聊窗口还是部门窗口
-
-		if (rows == 0) {	//要添加的窗口是单聊窗口
-			QString sql = QString("SELECT employee_name, employee_sign FROM tab_employees WHERE employeeID = %1").arg(uid);
-			sqlDepModel.setQuery(sql);
-		}
-
-		//设置聊天窗口名，聊天列表项内容
-		QString strWindowName, strMsgLabel;
-		QModelIndex nameIndex, signIndex;
-		nameIndex = sqlDepModel.index(0, 0);
-		signIndex = sqlDepModel.index(0, 1);
-		strWindowName = sqlDepModel.data(signIndex).toString();
-		strMsgLabel = sqlDepModel.data(nameIndex).toString();
-
-		talkwindow->setWindowName(strWindowName);
-		talkwindowItem->setMsgLabelContent(strMsgLabel);
-
-		m_talkwindowshell->addTalkWindow(talkwindow, talkwindowItem, uid);
+	if (!widget) {	//没有找到uid对应的talkwindow时，发请求拉取会话信息（窗口在响应回调里创建）
+		m_talkwindowshell->sendFetchTalkInfo(uid);
 	}
 	else {	//找到uid对应的talkwindow时，设为当前窗口，talkwidowitem设为选中
 		m_talkwindowshell->setCurrentWidget(widget);
 		QListWidgetItem* item = m_talkwindowshell->getTalkWindowItemMap().key(widget);
 		item->setSelected(true);
+
+		//显示唯一的talkwindowshell
+		m_talkwindowshell->show();
+		m_talkwindowshell->activateWindow();
 	}
+}
+
+void WindowManager::createTalkWindow(const QJsonObject& talkInfo)
+{
+	QString uid = talkInfo.value("uid").toString();
+	QString name = talkInfo.value("name").toString();
+	QString sign = talkInfo.value("sign").toString();
+	QString picture = talkInfo.value("picture").toString();
+
+	m_creatingTalkInfo = talkInfo;
+	TalkWindow* talkwindow = new TalkWindow(m_talkwindowshell, uid, talkInfo);
+	TalkWindowItem* talkwindowItem = new TalkWindowItem(talkwindow);
+
+	talkwindow->setWindowName(sign);
+	talkwindowItem->setMsgLabelContent(name);
+	m_talkwindowshell->addTalkWindow(talkwindow, talkwindowItem, uid, picture);
 
 	//显示唯一的talkwindowshell
 	m_talkwindowshell->show();
 	m_talkwindowshell->activateWindow();
 }
 
-QString WindowManager::getCreatingTalkID()
+
+QJsonObject WindowManager::getCreatingTalkInfo()
 {
-	return m_strCreatingTalkID;
+	return m_creatingTalkInfo;
 }
 
 TalkWindowShell* WindowManager::getTalkWindowShell()

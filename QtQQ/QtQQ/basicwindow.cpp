@@ -6,9 +6,6 @@
 #include <QStyleOption>
 #include <QPainter>
 #include <QApplication>
-#include <QSqlQuery>
-
-extern QString gLoginEmployeeID;
 
 BasicWindow::BasicWindow(QWidget *parent)
 	: QDialog(parent)
@@ -141,11 +138,6 @@ void BasicWindow::onShowNormal(bool)
 
 void BasicWindow::onShowQuit(bool)
 {
-	QSqlQuery sqlUpdate;
-	sqlUpdate.prepare("UPDATE tab_employees SET online_status = 1 WHERE employeeID = ?");
-	sqlUpdate.addBindValue(gLoginEmployeeID);
-	sqlUpdate.exec();
-
 	QApplication::quit();
 }
 

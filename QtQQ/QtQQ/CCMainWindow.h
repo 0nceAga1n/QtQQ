@@ -2,13 +2,14 @@
 
 #include "basicwindow.h"
 #include "ui_CCMainWindow.h"
+#include <QJsonArray>
 
 class CCMainWindow : public BasicWindow
 {
     Q_OBJECT
 
 public:
-    CCMainWindow(QString account, bool isAccountLogin, QWidget *parent = nullptr);  //参一为登录时账号输入，参二为判断输入的账号是员工id还是员工账号
+    CCMainWindow(QString loginPicture, QJsonArray departments, QWidget *parent = nullptr);  //参一为登录者头像，参二为联系人树
     ~CCMainWindow();
 
 public:
@@ -24,7 +25,7 @@ private:
     void initTimer();   //初始化定时器，模拟等级升级
     void initControl(); //初始化控件
     void updateSearchStyle();   //  更新搜索样式
-    void addCompanyDeps(QTreeWidgetItem* pRootGroupItem, int DepID); //添加聊天树里的子项
+    void addCompanyDeps(QTreeWidgetItem* pRootGroupItem, const QJsonObject& dep); //添加聊天树里的子项
     QString getHeadPicturePath();   //获取头像路径
 
 private:
@@ -42,8 +43,8 @@ private slots:
 
 private:
     Ui::CCMainWindowClass ui;
-    bool m_isAccountLogin;  //判断输入的账号是员工账号(true)还是员工id(false)
-    QString m_account;  //登录时输入的账号
+    QString m_loginPicture; //登录者头像
+    QJsonArray m_departments;   //联系人树
     //QMap<QTreeWidgetItem*, QString> m_groupMap; //映射聊天项->群名，从数据库中直接获取id后再得到群名即可
 };
 

@@ -1,6 +1,10 @@
 ﻿#pragma once
 
 #include <QWidget>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QPair>
+#include <QList>
 #include "ui_talkwindow.h"
 #include "talkwindowshell.h"
 
@@ -19,7 +23,7 @@ class TalkWindow : public QWidget
 	Q_OBJECT
 
 public:
-	TalkWindow(QWidget *parent, const QString& uid);	//参二为窗口id（即数据库中的员工id和部门id）
+	TalkWindow(QWidget *parent, const QString& uid, const QJsonObject& talkInfo);	//参二为窗口id（即数据库中的员工id和部门id）
 	~TalkWindow();
 
 public:
@@ -32,21 +36,23 @@ private slots:
 	void onItemDoubleClicked(QTreeWidgetItem* item); //群员列表项双击
 	void onFileOpenBtnClicked(bool);	//点击打开文件按钮
 
+protected:
+	virtual void keyPressEvent(QKeyEvent* event) override;
+
 private:
 	void initControl();
-	void initGroupTalkStatus();	//判断窗口是单聊还是部门群聊
-	int getComDepID();	//从数据库中获取公司群id
 
 	void initPtoPTalk();		//初始化单聊群聊
 	void initTalkWindow();		//初始化部门群聊
+	void addPeopInfo(QTreeWidgetItem* pRootGroupItem, const QJsonObject& member);	//添加群员信息
 
-	void addPeopInfo(QTreeWidgetItem* pRootGroupItem, int employeeID);	//添加群员信息
+	QString removeFileChips(const QString& html);	//提出html里的文件chip
 
 private:
 	Ui::TalkWindow ui;
 	QString m_talkId;	//区分不同talkwindow
-	bool m_isGroupTalk;	//区分单聊窗口还是部门窗口
-
+	QJsonObject m_talkInfo;	//创建的窗口的信息
+	QList<QPair<QString, QString>> m_pendingFiles;	//待发送文件<路径,文件名>
 	friend class TalkWindowShell;	//声明友元类
 };
 

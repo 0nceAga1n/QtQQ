@@ -3,21 +3,20 @@
 #include "contactitem.h"
 #include "commonutils.h"
 #include "windowmanager.h"
+
 #include <QToolTip>
 #include <QFile>
 #include <QMessageBox>
-#include <QSqlQuery>
-#include <QSqlQueryModel>
-#include "sendfile.h"
+#include <QFileDialog>
 
-TalkWindow::TalkWindow(QWidget* parent, const QString& uid)
-	: QWidget(parent), m_talkId(uid)
+
+TalkWindow::TalkWindow(QWidget* parent, const QString& uid, const QJsonObject& talkInfo)
+	: QWidget(parent), m_talkId(uid), m_talkInfo(talkInfo)
 {
 	ui.setupUi(this);
 	WindowManager::getInstance()->addWindowName(m_talkId, this);	//注册到窗口管理类的映射里
 	setAttribute(Qt::WA_DeleteOnClose);
 
-	initGroupTalkStatus();
 	initControl();
 }
 
@@ -46,43 +45,41 @@ QString TalkWindow::getTalkId()
 
 void TalkWindow::onSendBtnClicked(bool)
 {
+	bool hasText = !ui.textEdit->toPlainText().isEmpty();
+	bool hasFile = !m_pendingFiles.isEmpty();
 	//消息为空直接返回
-	if (ui.textEdit->toPlainText().isEmpty()) {
+	if (!hasText && !hasFile) {
 		QToolTip::showText(this->mapToGlobal(QPoint(630, 660)), 
 			QString::fromUtf8("发送的信息不能为空！"), 
 			this, 
 			QRect(0, 0, 120, 100), 2000);
 		return;
 	}
-	
-	//获取消息
-	QString html = ui.textEdit->document()->toHtml();
-	if (!html.contains("</span>")) {	//发送的是文字且文字没有样式
-		QString fontHtml;
-		QString text = ui.textEdit->toPlainText();	//获取文本
-		text.remove(QChar::ObjectReplacementCharacter);  //去掉表情占位符
-		if (!text.isEmpty()) {
-			// 只剩表情，没有文字，跳过包装，有文字则进入该分支
-			QFile file(":/Resources/MainWindow/MsgHtml/msgFont.txt");	//加载html
-			if (file.open(QIODevice::ReadOnly)) {
-				fontHtml = file.readAll();
-				fontHtml.replace("%1", text);	//将文本写进带样式的html
-				file.close();
-			}
-			else {
-				QMessageBox::information(this, QString::fromUtf8("提示"), QString::fromUtf8("文件不存在"));
-				return;
-			}
 
-			if (!html.contains(fontHtml)) {	//将原消息中的文本替换为带样式的文本
-				html.replace(text, fontHtml);
-			}
-		}
+	//构造文件segments
+	QJsonArray fileSegments;
+	for (const auto& f : m_pendingFiles) {
+		QFile file(f.first);
+		if (!file.open(QIODevice::ReadOnly)) continue;
+		QByteArray content = file.readAll();
+		file.close();
+
+		QJsonObject seg;
+		seg.insert("type", QString("file"));
+		seg.insert("name", f.second);
+		seg.insert("size", content.size());
+		seg.insert("data", QString::fromLatin1(content.toBase64()));
+		fileSegments.append(seg);
 	}
+	m_pendingFiles.clear();
+	
+	//获取 除文件链接外的 消息
+	QString html = removeFileChips(ui.textEdit->document()->toHtml());
+
 	ui.textEdit->clear();	//清空编辑区
 	ui.textEdit->deleteAllEmotionImage();	//释放资源
 
-	ui.msgWidget->appendMsg(html);	//聊天窗口添加信息
+	ui.msgWidget->appendMsg(html, "0", true, fileSegments);	//聊天窗口添加信息
 }
 
 void TalkWindow::onItemDoubleClicked(QTreeWidgetItem* item)
@@ -97,8 +94,24 @@ void TalkWindow::onItemDoubleClicked(QTreeWidgetItem* item)
 
 void TalkWindow::onFileOpenBtnClicked(bool)
 {
-	SendFile* sendFile = new SendFile(this);
-	sendFile->show();
+	QString path = QFileDialog::getOpenFileName(this, QString::fromUtf8("选择文件"), "/", "所有文件 (*.*)");
+	if (path.isEmpty()) return;
+
+	//保存文件路径和文件名
+	m_pendingFiles.append(qMakePair(path, QFileInfo(path).fileName()));
+
+	// 在输入框里插入一个可视 chip（真实数据在 m_pendingFiles）
+	ui.textEdit->insertHtml(QString("<a href=\"#file\">📎 %1</a> ").arg(QFileInfo(path).fileName()));
+}
+
+void TalkWindow::keyPressEvent(QKeyEvent* event)
+{
+	if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+		onSendBtnClicked(1);
+	}
+	else {
+		QWidget::keyPressEvent(event);
+	}
 }
 
 void TalkWindow::initControl()
@@ -122,36 +135,14 @@ void TalkWindow::initControl()
 
 	connect(ui.treeWidget, SIGNAL(itemDoubleClicked(QTreeWidgetItem*, int)), this, SLOT(onItemDoubleClicked(QTreeWidgetItem*)));
 
-	if (m_isGroupTalk) {	//部门群聊
+	connect(ui.textEdit, SIGNAL(sendMsgSignal(bool)), this, SLOT(onSendBtnClicked(bool)));
+
+	if (m_talkInfo.value("is_group").toInt() == 1) {	//部门群聊
 		initTalkWindow();
 	}
 	else {	//单聊
 		initPtoPTalk();
 	}
-}
-
-void TalkWindow::initGroupTalkStatus()
-{
-	//在部门表中查找uid，不存在说明窗口为单聊窗口
-	QSqlQueryModel sqlDepModel;
-	QString strSql = QString("SELECT * FROM tab_department WHERE departmentID = %1").arg(m_talkId);
-	sqlDepModel.setQuery(strSql);
-	int rows = sqlDepModel.rowCount();
-	if (rows == 0) {	//单聊窗口
-		m_isGroupTalk = false;
-	}
-	else {	//部门窗口
-		m_isGroupTalk = true;
-	}
-}
-
-int TalkWindow::getComDepID()
-{
-	//获取公司群id
-	QSqlQuery queryDepID(QString("SELECT departmentID FROM tab_department WHERE department_name = '%1'").arg(QString::fromUtf8("公司群")));
-	queryDepID.exec();
-	queryDepID.next();
-	return queryDepID.value(0).toInt();
 }
 
 void TalkWindow::initPtoPTalk()
@@ -178,23 +169,10 @@ void TalkWindow::initTalkWindow()
 	RootContactItem* pItemName = new RootContactItem(false, ui.treeWidget);	//没有箭头的根控件
 	ui.treeWidget->setFixedHeight(646);
 
-	//获取部门名称
-	QString strGroupName;	
-	QSqlQuery queryGroupName(QString("SELECT department_name FROM tab_department WHERE departmentID = %1").arg(m_talkId));
-	queryGroupName.exec();
-	if (queryGroupName.next()) {
-		strGroupName = queryGroupName.value(0).toString();
-	}
-
-	//获取群聊人数
-	QSqlQueryModel queryEmployeeModel;
-	if (getComDepID() == m_talkId.toInt()) {	//公司群
-		queryEmployeeModel.setQuery("SELECT employeeID FROM tab_employees WHERE status = 1");
-	}
-	else {	//部门群
-		queryEmployeeModel.setQuery(QString("SELECT employeeID FROM tab_employees WHERE status = 1 AND departmentID = %1").arg(m_talkId));
-	}
-	int nEmployeeNum = queryEmployeeModel.rowCount();
+	//获取部门名称、群聊人数
+	QString strGroupName = m_talkInfo.value("name").toString();
+	QJsonArray members = m_talkInfo.value("members").toArray();
+	int nEmployeeNum = members.size();
 
 	//设置根控件内容
 	QString qsGroupName = QString::fromUtf8("%1 %2/%3").arg(strGroupName).arg(0).arg(nEmployeeNum);
@@ -208,15 +186,18 @@ void TalkWindow::initTalkWindow()
 	pRootItem->setExpanded(true);
 
 	//添加群员
-	for (int i = 0; i < nEmployeeNum; i++) {
-		QModelIndex modelIndex = queryEmployeeModel.index(i, 0);
-		int employeeID = queryEmployeeModel.data(modelIndex).toInt();
-		addPeopInfo(pRootItem, employeeID);
+	for (const QJsonValue& v : members) {
+		addPeopInfo(pRootItem, v.toObject());
 	}
 }
 
-void TalkWindow::addPeopInfo(QTreeWidgetItem* pRootGroupItem, int employeeID)
+void TalkWindow::addPeopInfo(QTreeWidgetItem* pRootGroupItem, const QJsonObject& member)
 {
+	QString employeeID = member.value("employeeID").toString();
+	QString strName = member.value("employee_name").toString();
+	QString strSign = member.value("employee_sign").toString();
+	QString strPicturePath = member.value("picture").toString();
+
 	//初始化子项
 	QTreeWidgetItem* pChild = new QTreeWidgetItem();
 	pChild->setData(0, Qt::UserRole, 1);	//子项标志为1
@@ -224,18 +205,6 @@ void TalkWindow::addPeopInfo(QTreeWidgetItem* pRootGroupItem, int employeeID)
 
 	//初始化子控件
 	ContactItem* pContactItem = new ContactItem(ui.treeWidget);
-
-	//从数据库中获取头像路径，名字，个性签名
-	QString strName, strSign, strPicturePath;
-	QSqlQueryModel queryInfoModel;
-	queryInfoModel.setQuery(QString("SELECT employee_name, employee_sign, picture FROM tab_employees WHERE employeeID = %1").arg(employeeID));
-	QModelIndex nameIndex, signIndex, pictureIndex;
-	nameIndex = queryInfoModel.index(0, 0);
-	signIndex = queryInfoModel.index(0, 1);
-	pictureIndex = queryInfoModel.index(0, 2);
-	strName = queryInfoModel.data(nameIndex).toString();
-	strSign = queryInfoModel.data(signIndex).toString();
-	strPicturePath = queryInfoModel.data(pictureIndex).toString();
 
 	//头像
 	QPixmap pix1;
@@ -250,4 +219,13 @@ void TalkWindow::addPeopInfo(QTreeWidgetItem* pRootGroupItem, int employeeID)
 	//根项添加子项，子控件嵌入子项
 	pRootGroupItem->addChild(pChild);
 	ui.treeWidget->setItemWidget(pChild, 0, pContactItem);
+}
+
+QString TalkWindow::removeFileChips(const QString& html)
+{
+	QString result = html;
+	QRegularExpression re("<a[^>]*href=\"#file\"[^>]*>.*?</a>",
+		QRegularExpression::DotMatchesEverythingOption);
+	result.remove(re);
+	return result;
 }

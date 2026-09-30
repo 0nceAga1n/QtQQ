@@ -52,3 +52,18 @@ void QMsgTextEdit::deleteAllEmotionImage()
 	m_listEmotionUrl.clear();	//避免第二次添加相同表情时表情不会动
 }
 
+void QMsgTextEdit::keyPressEvent(QKeyEvent* event)
+{
+	if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+		if (event->modifiers() & Qt::ShiftModifier) {
+			QTextEdit::keyPressEvent(event);
+		}
+		else {
+			emit sendMsgSignal(1);
+		}
+	}
+	else {
+		QTextEdit::keyPressEvent(event);
+	}
+}
+

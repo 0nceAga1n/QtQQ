@@ -1,4 +1,7 @@
 ﻿#include "QtQQ_Server.h"
+#include "msgprotocol.h"
+#include "passwordutils.h"
+
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSqlRecord>
@@ -9,9 +12,6 @@
 #include <QDebug>
 #include <QFileDialog>
 
-const int gtcpPort = 8888;
-const int gudpPort = 6666;
-
 QtQQ_Server::QtQQ_Server(QWidget *parent)
     : QDialog(parent)
     , m_queryMode(All)  //初始查询模式为查询所有员工
@@ -19,7 +19,6 @@ QtQQ_Server::QtQQ_Server(QWidget *parent)
     , m_queryEmployeeID(0)
     , m_timer(nullptr)
     , m_tcpServer(nullptr)
-    , m_udpSender(nullptr)
     , m_pixPath("")
 {
     ui.setupUi(this);
@@ -40,7 +39,6 @@ QtQQ_Server::QtQQ_Server(QWidget *parent)
     connect(m_timer, &QTimer::timeout, this, &QtQQ_Server::onRefresh);  //每隔一秒刷新一次表格
     m_timer->start();
 
-    initUdpSocket();
     initTcpServer();
 }
 
@@ -101,30 +99,40 @@ void QtQQ_Server::initTableWidget()
 
     QStringList headers;
     headers << QStringLiteral("部门")
-            << QStringLiteral("员工号")
-            << QStringLiteral("员工姓名")
-            << QStringLiteral("员工签名")
-            << QStringLiteral("员工状态")
-            << QStringLiteral("员工照片")
-            << QStringLiteral("在线状态");
+        << QStringLiteral("员工号")
+        << QStringLiteral("员工姓名")
+        << QStringLiteral("员工签名")
+        << QStringLiteral("员工状态")
+        << QStringLiteral("员工照片");
     ui.tableWidget->setColumnCount(headers.size());
     ui.tableWidget->setHorizontalHeaderLabels(headers);
     ui.tableWidget->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 }
 
-QString QtQQ_Server::buildQuery() const
+void QtQQ_Server::prepareQuery(QSqlQuery& query) const
 {
     switch (m_queryMode) {
     case ByDepartment:  //部门查询
-        if (m_queryDepID > 0)
-            return QString("SELECT * FROM tab_employees WHERE departmentID = %1").arg(m_queryDepID);    //其他部门
-        return "SELECT * FROM tab_employees";   //公司群
+        if (m_queryDepID > 0) {     //其他部门
+            query.prepare("SELECT * FROM tab_employees WHERE departmentID = ?");
+            query.addBindValue(m_queryDepID);
+        }
+        else {      //公司群
+            query.prepare("SELECT * FROM tab_employees");
+        }
+        break;
     case ByEmployeeID:  //id查询
-        if (m_queryEmployeeID > 0)
-            return QString("SELECT * FROM tab_employees WHERE employeeID = %1").arg(m_queryEmployeeID);
-        return "SELECT * FROM tab_employees";
+        if (m_queryEmployeeID > 0) {
+            query.prepare("SELECT * FROM tab_employees WHERE employeeID = ?");
+            query.addBindValue(m_queryEmployeeID);
+        }
+        else {
+            query.prepare("SELECT * FROM tab_employees");
+        }
+        break;
     default:    //查询所有
-        return "SELECT * FROM tab_employees";
+        query.prepare("SELECT * FROM tab_employees");
+        break;
     }
 }
 
@@ -144,18 +152,11 @@ QString QtQQ_Server::mapStatus(const QString& status) const
     return status;
 }
 
-QString QtQQ_Server::mapOnline(const QString& online) const
-{
-    if (online == "1") return QStringLiteral("离线");
-    if (online == "2") return QStringLiteral("在线");
-    if (online == "3") return QStringLiteral("隐身");
-    return online;
-}
-
 void QtQQ_Server::refreshTable()
 {
     QSqlQuery query;
-    if (!query.exec(buildQuery())) {
+    prepareQuery(query);
+    if (!query.exec()) {
         qDebug() << "refreshTable query failed:" << query.lastError().text();
         return;
     }
@@ -180,8 +181,6 @@ void QtQQ_Server::refreshTable()
                 displayText = mapDepartmentID(value);
             else if (fieldName == "status")
                 displayText = mapStatus(value);
-            else if (fieldName == "online")
-                displayText = mapOnline(value);
 
             QTableWidgetItem* item = ui.tableWidget->item(i, j);    //获取表格中的项
             if (!item) {    //项为空，新创建并设置到表格里
@@ -268,20 +267,19 @@ void QtQQ_Server::on_addBtn_clicked()
 
     //插入员工到员工表
     QSqlQuery insertSql;
-    insertSql.prepare("INSERT INTO tab_employees(departmentID, employeeID, employee_name, status, picture, online) VALUES(?, ?, ?, ?, ?, ?)");
+    insertSql.prepare("INSERT INTO tab_employees(departmentID, employeeID, employee_name, status, picture) VALUES(?, ?, ?, ?, ?)");
     insertSql.addBindValue(depID);
     insertSql.addBindValue(employeeID);
     insertSql.addBindValue(strName);
     insertSql.addBindValue(1);
     insertSql.addBindValue(m_pixPath);
-    insertSql.addBindValue(1);
     insertSql.exec();
 
     //插入员工账号到账号表
     insertSql.prepare("INSERT INTO tab_accounts(employeeID, account, code) VALUES(?, ?, ?)");
     insertSql.addBindValue(employeeID);
     insertSql.addBindValue(strName);
-    insertSql.addBindValue(strName);
+    insertSql.addBindValue(hashPassword(strName));
     insertSql.exec();
 
     QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("新增员工成功"));
@@ -313,21 +311,6 @@ void QtQQ_Server::onRefresh()
 void QtQQ_Server::initTcpServer()
 {
     //初始化服务端
-    m_tcpServer = new TcpServer(gtcpPort);
+    m_tcpServer = new TcpServer(MsgProtocol::TCP_PORT);
     m_tcpServer->run();
-
-    //服务端收到数据时进行广播
-    connect(m_tcpServer, &TcpServer::signalTcpMsgComes, this, &QtQQ_Server::onUDPbroadMsg);
-}
-
-void QtQQ_Server::initUdpSocket()
-{
-    m_udpSender = new QUdpSocket(this);
-}
-
-void QtQQ_Server::onUDPbroadMsg(QByteArray& btData)
-{
-    for (quint16 port = gudpPort; port < gudpPort + 200; ++port) {
-        m_udpSender->writeDatagram(btData, btData.size(), QHostAddress::Broadcast, port);
-    }
 }
